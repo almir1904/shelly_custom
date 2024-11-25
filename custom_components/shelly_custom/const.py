@@ -2,9 +2,7 @@
 from datetime import timedelta
 
 DOMAIN = "shelly_custom"
-DEFAULT_SCAN_INTERVAL = 1  # 1 second polling
-MIN_SCAN_INTERVAL = 1
-MAX_SCAN_INTERVAL = 60
+DEFAULT_SCAN_INTERVAL = timedelta(seconds=30)
 
 CONF_SCAN_INTERVAL = "scan_interval"
 DEFAULT_NAME = "Shelly Switch"

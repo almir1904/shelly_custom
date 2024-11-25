@@ -1,5 +1,5 @@
 {
-    "name": "Shelly Custom Integration",
+    "name": "Shelly Mongoose Custom Integration",
     "render_readme": true,
     "domains": ["switch"],
     "homeassistant": "2023.8.0",
