@@ -6,11 +6,9 @@ import json
 import asyncio
 from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.const import CONF_HOST, CONF_NAME, STATE_ON
-
-from .const import DOMAIN
+from homeassistant.const import CONF_HOST, CONF_NAME
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,13 +18,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Shelly switch."""
-    async_add_entities([
-        ShellySwitch(
-            entry.data[CONF_HOST],
-            entry.data[CONF_NAME],
-            entry.entry_id,
-        )
-    ])
+    async_add_entities([ShellySwitch(entry.data[CONF_HOST], entry.data[CONF_NAME], entry.entry_id)])
 
 class ShellySwitch(SwitchEntity):
     """Representation of a Shelly switch."""
@@ -49,34 +41,41 @@ class ShellySwitch(SwitchEntity):
         """Run when entity is added."""
         await super().async_added_to_hass()
         self._update_task = asyncio.create_task(self._update_loop())
+        _LOGGER.debug("Started state polling for %s", self._attr_name)
 
     async def _update_loop(self) -> None:
         """Periodically poll the device."""
         while True:
             await self._update_state()
-            await asyncio.sleep(1)  # Poll every second
+            await asyncio.sleep(1)
 
     async def _update_state(self) -> None:
         """Update the state."""
         try:
             async with async_timeout.timeout(5):
-                url = f"http://{self._host}/rpc/Shelly.GetInfo"
+                url = f"http://{self._host}/rpc/Shelly.GetInfoExt"
                 async with self._session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
                         for component in data.get('components', []):
                             if component.get('id') == 1:
-                                self._attr_available = True
                                 new_state = component.get('state', False)
                                 if new_state != self._attr_is_on:
+                                    _LOGGER.debug(
+                                        "%s: State changed from %s to %s",
+                                        self._attr_name,
+                                        self._attr_is_on,
+                                        new_state
+                                    )
                                     self._attr_is_on = new_state
                                     self.async_write_ha_state()
                                 break
+                        self._attr_available = True
                     else:
                         self._attr_available = False
                         self.async_write_ha_state()
         except Exception as err:
-            _LOGGER.debug("Error updating state: %s", err)
+            _LOGGER.debug("Error updating state for %s: %s", self._attr_name, err)
             self._attr_available = False
             self.async_write_ha_state()
 
@@ -109,6 +108,6 @@ class ShellySwitch(SwitchEntity):
                     if response.status == 200:
                         await self._update_state()
         except Exception as err:
-            _LOGGER.error("Error setting state: %s", err)
+            _LOGGER.error("Error setting state for %s: %s", self._attr_name, err)
             self._attr_available = False
             self.async_write_ha_state()
