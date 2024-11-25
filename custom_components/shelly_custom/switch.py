@@ -1,16 +1,19 @@
 """Switch platform for Shelly Custom integration."""
 import logging
+from datetime import timedelta
 import aiohttp
 import async_timeout
-import asyncio
 import json
-from datetime import timedelta
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.const import CONF_HOST, CONF_NAME
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .const import DOMAIN
 
@@ -22,60 +25,67 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Shelly switch from config entry."""
-    host = config_entry.data[CONF_HOST]
-    name = config_entry.data[CONF_NAME]
-    
-    switch = ShellySwitch(hass, name, host, config_entry.entry_id)
-    async_add_entities([switch], True)
+    coordinator = ShellyUpdateCoordinator(
+        hass,
+        config_entry,
+        _LOGGER,
+        name="Shelly Device",
+        update_interval=timedelta(seconds=1),
+    )
 
-class ShellySwitch(SwitchEntity):
+    # Fetch initial data
+    await coordinator.async_config_entry_first_refresh()
+
+    async_add_entities(
+        [ShellySwitch(coordinator, config_entry.data[CONF_NAME])],
+        False
+    )
+
+class ShellyUpdateCoordinator(DataUpdateCoordinator):
+    """Class to manage fetching Shelly data."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        logger: logging.Logger,
+        name: str,
+        update_interval: timedelta,
+    ) -> None:
+        """Initialize the coordinator."""
+        super().__init__(
+            hass,
+            logger,
+            name=name,
+            update_interval=update_interval,
+        )
+        self.host = config_entry.data[CONF_HOST]
+
+    async def _async_update_data(self):
+        """Fetch data from Shelly device."""
+        try:
+            async with async_timeout.timeout(10):
+                async with aiohttp.ClientSession() as session:
+                    url = f"http://{self.host}/rpc/Shelly.GetInfo"
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            # Extract state from components array
+                            for component in data.get('components', []):
+                                if component.get('id') == 1:
+                                    return {"state": component.get('state', False)}
+                            return {"state": False}
+        except Exception as err:
+            raise UpdateFailed(f"Error communicating with device: {err}")
+
+class ShellySwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Shelly switch."""
 
-    def __init__(self, hass, name, host, entry_id):
+    def __init__(self, coordinator: ShellyUpdateCoordinator, name: str) -> None:
         """Initialize the switch."""
-        self._hass = hass
+        super().__init__(coordinator)
         self._name = name
-        self._host = host
-        self._entry_id = entry_id
-        self._state = None
-        self._available = True
-        self._attr_unique_id = f"{entry_id}_switch"
-        self._session = async_get_clientsession(hass)
-        self._polling_task = None
-        self._polling_active = True
-
-    async def async_added_to_hass(self) -> None:
-        """Run when entity about to be added to hass."""
-        self._polling_active = True
-        self.hass.loop.create_task(self._polling_loop())
-        _LOGGER.debug("Started polling for %s", self._name)
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Run when entity will be removed from hass."""
-        self._polling_active = False
-        _LOGGER.debug("Stopped polling for %s", self._name)
-
-    async def _polling_loop(self):
-        """Poll the device every second."""
-        _LOGGER.debug("Polling loop started for %s", self._name)
-        while self._polling_active:
-            try:
-                await self._async_update_state()
-                await asyncio.sleep(1)  # Wait 1 second between polls
-            except Exception as err:
-                _LOGGER.error("Error in polling loop for %s: %s", self._name, err)
-                await asyncio.sleep(1)  # Wait before retrying on error
-
-    async def _async_update_state(self):
-        """Update the state of the device."""
-        try:
-            new_state = await self._get_state()
-            if new_state != self._state:
-                self._state = new_state
-                self.async_write_ha_state()
-                _LOGGER.debug("State updated for %s to %s", self._name, self._state)
-        except Exception as err:
-            _LOGGER.error("Error updating state for %s: %s", self._name, err)
+        self._attr_unique_id = f"shelly_custom_{coordinator.host}"
 
     @property
     def name(self):
@@ -85,33 +95,26 @@ class ShellySwitch(SwitchEntity):
     @property
     def is_on(self):
         """Return true if switch is on."""
-        return self._state
+        return self.coordinator.data.get("state", False) if self.coordinator.data else False
 
     @property
     def available(self):
-        """Return True if entity is available."""
-        return self._available
+        """Return if entity is available."""
+        return self.coordinator.last_update_success
 
-    async def _get_state(self):
-        """Get the current state from the Shelly device."""
-        url = f"http://{self._host}/rpc/Shelly.GetInfo"
-        try:
-            async with async_timeout.timeout(5):
-                async with self._session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        for component in data.get('components', []):
-                            if component.get('id') == 1:
-                                self._available = True
-                                return component.get('state', False)
-                    return self._state
-        except Exception as err:
-            self._available = False
-            raise err
+    async def async_turn_on(self, **kwargs):
+        """Turn the switch on."""
+        await self._set_state(True)
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs):
+        """Turn the switch off."""
+        await self._set_state(False)
+        await self.coordinator.async_request_refresh()
 
     async def _set_state(self, state: bool):
         """Set the state of the switch."""
-        url = f"http://{self._host}/rpc/Shelly.SetState"
+        url = f"http://{self.coordinator.host}/rpc/Shelly.SetState"
         state_json = json.dumps({"state": state})
         params = {
             "id": "1",
@@ -120,31 +123,9 @@ class ShellySwitch(SwitchEntity):
         }
         try:
             async with async_timeout.timeout(10):
-                async with self._session.get(url, params=params) as response:
-                    if response.status == 200:
-                        self._state = state
-                        self._available = True
-                        self.async_write_ha_state()
-                        return True
-                    else:
-                        _LOGGER.error("Error setting state: %s", await response.text())
-                        return False
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params) as response:
+                        if response.status != 200:
+                            _LOGGER.error("Error setting state: %s", await response.text())
         except Exception as err:
             _LOGGER.error("Error setting state: %s", err)
-            self._available = False
-            return False
-
-    async def async_turn_on(self, **kwargs):
-        """Turn the switch on."""
-        await self._set_state(True)
-
-    async def async_turn_off(self, **kwargs):
-        """Turn the switch off."""
-        await self._set_state(False)
-
-    async def async_update(self):
-        """Fetch new state data for this switch."""
-        try:
-            self._state = await self._get_state()
-        except Exception as err:
-            _LOGGER.error("Error in async_update for %s: %s", self._name, err)
