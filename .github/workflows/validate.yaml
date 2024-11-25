@@ -5,13 +5,39 @@ on:
   pull_request:
   schedule:
     - cron: "0 0 * * *"
+  workflow_dispatch:
 
 jobs:
   validate:
-    runs-on: "ubuntu-latest"
+    runs-on: ubuntu-latest
     steps:
-      - uses: "actions/checkout@v2"
-      - uses: "home-assistant/actions/hassfest@master"
-      - uses: "hacs/action@main"
+      - uses: actions/checkout@v4
+      
+      - name: HACS validation
+        uses: "hacs/action@main"
         with:
           category: "integration"
+
+      - name: Hassfest validation
+        uses: "home-assistant/actions/hassfest@master"
+
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check version consistency
+        run: |
+          manifest_version=$(grep -oP '"version": "\K[^"]+' custom_components/shelly_custom/manifest.json)
+          if [ -z "$manifest_version" ]; then
+            echo "Error: No version found in manifest.json"
+            exit 1
+          fi
+          
+          echo "Manifest version: $manifest_version"
+          echo "Version format check..."
+          if ! [[ $manifest_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Version in manifest.json does not follow semantic versioning (x.y.z)"
+            exit 1
+          fi
+          echo "Version format is valid"

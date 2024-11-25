@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release_zip:
+    name: Create release zip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create zip
+        run: |
+          cd custom_components/shelly_custom
+          zip -r ../../shelly_custom.zip .
+
+      - name: Upload zip to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: shelly_custom.zip
+          asset_name: shelly_custom.zip
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  notify_hacs:
+    name: Notify HACS
+    needs: release_zip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: HACS Action
+        uses: "hacs/action@main"
+        with:
+          category: "integration"
