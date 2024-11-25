@@ -6,7 +6,15 @@ from homeassistant.const import CONF_HOST, CONF_NAME
 import aiohttp
 import async_timeout
 
-from .const import DOMAIN, ERROR_CANNOT_CONNECT, ERROR_UNKNOWN
+from .const import (
+    DOMAIN, 
+    ERROR_CANNOT_CONNECT, 
+    ERROR_UNKNOWN, 
+    CONF_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
+    MIN_SCAN_INTERVAL,
+    MAX_SCAN_INTERVAL
+)
 
 class ShellyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Shelly devices."""
@@ -32,6 +40,11 @@ class ShellyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 await self.async_set_unique_id(unique_id)
                                 self._abort_if_unique_id_configured()
 
+                                # Add scan_interval to the saved data
+                                user_input[CONF_SCAN_INTERVAL] = user_input.get(
+                                    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                                )
+
                                 return self.async_create_entry(
                                     title=user_input[CONF_NAME],
                                     data=user_input
@@ -49,6 +62,10 @@ class ShellyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(CONF_HOST): str,
                 vol.Required(CONF_NAME): str,
+                vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL)
+                ),
             }),
             errors=errors,
         )

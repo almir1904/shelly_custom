@@ -5,7 +5,8 @@
                 "title": "Add Shelly Device",
                 "data": {
                     "host": "IP Address",
-                    "name": "Name"
+                    "name": "Name",
+                    "scan_interval": "Update interval (seconds)"
                 }
             }
         },
