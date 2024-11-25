@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.const import CONF_HOST, CONF_NAME
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN
 
@@ -24,7 +25,8 @@ async def async_setup_entry(
     host = config_entry.data[CONF_HOST]
     name = config_entry.data[CONF_NAME]
     
-    async_add_entities([ShellySwitch(hass, name, host, config_entry.entry_id)], True)
+    switch = ShellySwitch(hass, name, host, config_entry.entry_id)
+    async_add_entities([switch], True)
 
 class ShellySwitch(SwitchEntity):
     """Representation of a Shelly switch."""
@@ -38,33 +40,42 @@ class ShellySwitch(SwitchEntity):
         self._state = None
         self._available = True
         self._attr_unique_id = f"{entry_id}_switch"
+        self._session = async_get_clientsession(hass)
         self._polling_task = None
+        self._polling_active = True
 
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
-        self._polling_task = asyncio.create_task(self._polling_loop())
+        self._polling_active = True
+        self.hass.loop.create_task(self._polling_loop())
+        _LOGGER.debug("Started polling for %s", self._name)
 
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity will be removed from hass."""
-        if self._polling_task:
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
+        self._polling_active = False
+        _LOGGER.debug("Stopped polling for %s", self._name)
 
     async def _polling_loop(self):
-        """Loop to poll device state."""
-        while True:
+        """Poll the device every second."""
+        _LOGGER.debug("Polling loop started for %s", self._name)
+        while self._polling_active:
             try:
-                new_state = await self._get_state()
-                if new_state != self._state:
-                    self._state = new_state
-                    self.async_write_ha_state()
+                await self._async_update_state()
+                await asyncio.sleep(1)  # Wait 1 second between polls
             except Exception as err:
-                _LOGGER.debug("Error in polling loop: %s", err)
-            
-            await asyncio.sleep(1)  # Poll every second
+                _LOGGER.error("Error in polling loop for %s: %s", self._name, err)
+                await asyncio.sleep(1)  # Wait before retrying on error
+
+    async def _async_update_state(self):
+        """Update the state of the device."""
+        try:
+            new_state = await self._get_state()
+            if new_state != self._state:
+                self._state = new_state
+                self.async_write_ha_state()
+                _LOGGER.debug("State updated for %s to %s", self._name, self._state)
+        except Exception as err:
+            _LOGGER.error("Error updating state for %s: %s", self._name, err)
 
     @property
     def name(self):
@@ -85,19 +96,18 @@ class ShellySwitch(SwitchEntity):
         """Get the current state from the Shelly device."""
         url = f"http://{self._host}/rpc/Shelly.GetInfo"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with async_timeout.timeout(5):
-                    async with session.get(url) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            for component in data.get('components', []):
-                                if component.get('id') == 1:
-                                    self._available = True
-                                    return component.get('state', False)
-                        return self._state
+            async with async_timeout.timeout(5):
+                async with self._session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        for component in data.get('components', []):
+                            if component.get('id') == 1:
+                                self._available = True
+                                return component.get('state', False)
+                    return self._state
         except Exception as err:
             self._available = False
-            return self._state
+            raise err
 
     async def _set_state(self, state: bool):
         """Set the state of the switch."""
@@ -109,17 +119,16 @@ class ShellySwitch(SwitchEntity):
             "state": state_json
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with async_timeout.timeout(10):
-                    async with session.get(url, params=params) as response:
-                        if response.status == 200:
-                            self._state = state
-                            self._available = True
-                            self.async_write_ha_state()
-                            return True
-                        else:
-                            _LOGGER.error("Error setting state: %s", await response.text())
-                            return False
+            async with async_timeout.timeout(10):
+                async with self._session.get(url, params=params) as response:
+                    if response.status == 200:
+                        self._state = state
+                        self._available = True
+                        self.async_write_ha_state()
+                        return True
+                    else:
+                        _LOGGER.error("Error setting state: %s", await response.text())
+                        return False
         except Exception as err:
             _LOGGER.error("Error setting state: %s", err)
             self._available = False
@@ -135,4 +144,7 @@ class ShellySwitch(SwitchEntity):
 
     async def async_update(self):
         """Fetch new state data for this switch."""
-        self._state = await self._get_state()
+        try:
+            self._state = await self._get_state()
+        except Exception as err:
+            _LOGGER.error("Error in async_update for %s: %s", self._name, err)
