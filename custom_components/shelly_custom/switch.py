@@ -3,6 +3,7 @@ import logging
 import aiohttp
 import async_timeout
 import json
+import asyncio
 from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -42,11 +43,18 @@ class ShellySwitch(SwitchEntity):
         self._session = aiohttp.ClientSession()
         self._attr_is_on = False
         self._attr_available = True
+        self._update_task = None
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added."""
         await super().async_added_to_hass()
-        await self._update_state()
+        self._update_task = asyncio.create_task(self._update_loop())
+
+    async def _update_loop(self) -> None:
+        """Periodically poll the device."""
+        while True:
+            await self._update_state()
+            await asyncio.sleep(1)  # Poll every second
 
     async def _update_state(self) -> None:
         """Update the state."""
@@ -59,19 +67,25 @@ class ShellySwitch(SwitchEntity):
                         for component in data.get('components', []):
                             if component.get('id') == 1:
                                 self._attr_available = True
-                                self._attr_is_on = component.get('state', False)
+                                new_state = component.get('state', False)
+                                if new_state != self._attr_is_on:
+                                    self._attr_is_on = new_state
+                                    self.async_write_ha_state()
                                 break
                     else:
                         self._attr_available = False
+                        self.async_write_ha_state()
         except Exception as err:
-            _LOGGER.error("Error updating state: %s", err)
+            _LOGGER.debug("Error updating state: %s", err)
             self._attr_available = False
-        
-        self.async_write_ha_state()
+            self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
         """Close sessions when removed."""
+        if self._update_task:
+            self._update_task.cancel()
         await self._session.close()
+        await super().async_will_remove_from_hass()
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the entity on."""
