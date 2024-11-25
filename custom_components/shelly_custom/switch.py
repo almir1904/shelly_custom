@@ -8,7 +8,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.const import CONF_HOST, CONF_NAME
+from homeassistant.const import CONF_HOST, CONF_NAME, STATE_ON, STATE_OFF
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
@@ -25,21 +25,37 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Shelly switch from config entry."""
+    host = config_entry.data[CONF_HOST]
+    name = config_entry.data[CONF_NAME]
+
+    # Get initial state
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://{host}/rpc/Shelly.GetInfo") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    initial_state = False
+                    for component in data.get('components', []):
+                        if component.get('id') == 1:
+                            initial_state = component.get('state', False)
+                            break
+    except Exception as err:
+        _LOGGER.error("Error getting initial state: %s", err)
+        initial_state = False
+
     coordinator = ShellyUpdateCoordinator(
         hass,
-        config_entry,
-        _LOGGER,
+        host=host,
+        logger=_LOGGER,
         name="Shelly Device",
         update_interval=timedelta(seconds=1),
+        initial_state=initial_state,
     )
 
     # Fetch initial data
     await coordinator.async_config_entry_first_refresh()
 
-    async_add_entities(
-        [ShellySwitch(coordinator, config_entry.data[CONF_NAME])],
-        False
-    )
+    async_add_entities([ShellySwitch(coordinator, name)], False)
 
 class ShellyUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Shelly data."""
@@ -47,10 +63,11 @@ class ShellyUpdateCoordinator(DataUpdateCoordinator):
     def __init__(
         self,
         hass: HomeAssistant,
-        config_entry: ConfigEntry,
+        host: str,
         logger: logging.Logger,
         name: str,
         update_interval: timedelta,
+        initial_state: bool,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -59,8 +76,9 @@ class ShellyUpdateCoordinator(DataUpdateCoordinator):
             name=name,
             update_interval=update_interval,
         )
-        self.host = config_entry.data[CONF_HOST]
-        self._last_state = None
+        self.host = host
+        self.data = {"state": initial_state}
+        self._last_state = initial_state
 
     async def _async_update_data(self):
         """Fetch data from Shelly device."""
@@ -72,13 +90,11 @@ class ShellyUpdateCoordinator(DataUpdateCoordinator):
                         if response.status == 200:
                             data = await response.json()
                             current_state = None
-                            # Extract state from components array
                             for component in data.get('components', []):
                                 if component.get('id') == 1:
                                     current_state = component.get('state', False)
                                     break
 
-                            # If state has changed, log it
                             if current_state != self._last_state:
                                 _LOGGER.debug(
                                     "State changed from %s to %s",
@@ -101,7 +117,7 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         super().__init__(coordinator)
         self._name = name
         self._attr_unique_id = f"shelly_custom_{coordinator.host}"
-        self._last_state = None
+        self._attr_is_on = coordinator.data.get("state", False)
 
     @property
     def name(self):
@@ -111,25 +127,24 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if switch is on."""
-        if self.coordinator.data:
-            current_state = self.coordinator.data.get("state", False)
-            if current_state != self._last_state:
-                _LOGGER.debug("Switch state changed from %s to %s", self._last_state, current_state)
-                self._last_state = current_state
-            return current_state
-        return False
+        return self.coordinator.data.get("state", False)
+
+    @property
+    def state(self):
+        """Return the state of the switch."""
+        if self.coordinator.data.get("state"):
+            return STATE_ON
+        return STATE_OFF
 
     @property
     def available(self):
         """Return if entity is available."""
         return self.coordinator.last_update_success
 
-    @callback
     async def async_turn_on(self, **kwargs):
         """Turn the switch on."""
         await self._set_state(True)
 
-    @callback
     async def async_turn_off(self, **kwargs):
         """Turn the switch off."""
         await self._set_state(False)
@@ -148,7 +163,8 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, params=params) as response:
                         if response.status == 200:
-                            # Force an immediate data update
+                            self.coordinator.data = {"state": state}
+                            self.async_write_ha_state()
                             await self.coordinator.async_request_refresh()
                         else:
                             _LOGGER.error(
@@ -163,5 +179,5 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         await super().async_added_to_hass()
         _LOGGER.debug("Entity added to Home Assistant")
         
-        # Update state immediately
-        await self.coordinator.async_request_refresh()
+        # Force initial state update
+        self._handle_coordinator_update()
