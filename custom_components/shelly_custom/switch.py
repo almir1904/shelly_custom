@@ -28,32 +28,15 @@ async def async_setup_entry(
     host = config_entry.data[CONF_HOST]
     name = config_entry.data[CONF_NAME]
 
-    # Get initial state
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"http://{host}/rpc/Shelly.GetInfo") as response:
-                if response.status == 200:
-                    data = await response.json()
-                    initial_state = False
-                    for component in data.get('components', []):
-                        if component.get('id') == 1:
-                            initial_state = component.get('state', False)
-                            break
-    except Exception as err:
-        _LOGGER.error("Error getting initial state: %s", err)
-        initial_state = False
-
     coordinator = ShellyUpdateCoordinator(
         hass,
         host=host,
         logger=_LOGGER,
         name="Shelly Device",
         update_interval=timedelta(seconds=1),
-        initial_state=initial_state,
     )
 
-    # Fetch initial data
-    await coordinator.async_config_entry_first_refresh()
+    await coordinator.async_refresh()
 
     async_add_entities([ShellySwitch(coordinator, name)], False)
 
@@ -67,7 +50,6 @@ class ShellyUpdateCoordinator(DataUpdateCoordinator):
         logger: logging.Logger,
         name: str,
         update_interval: timedelta,
-        initial_state: bool,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -77,37 +59,39 @@ class ShellyUpdateCoordinator(DataUpdateCoordinator):
             update_interval=update_interval,
         )
         self.host = host
-        self.data = {"state": initial_state}
-        self._last_state = initial_state
+        self._last_state = None
+        self._session = aiohttp.ClientSession()
 
     async def _async_update_data(self):
         """Fetch data from Shelly device."""
         try:
             async with async_timeout.timeout(5):
-                async with aiohttp.ClientSession() as session:
-                    url = f"http://{self.host}/rpc/Shelly.GetInfo"
-                    async with session.get(url) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            current_state = None
-                            for component in data.get('components', []):
-                                if component.get('id') == 1:
-                                    current_state = component.get('state', False)
-                                    break
+                url = f"http://{self.host}/rpc/Shelly.GetInfo"
+                async with self._session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        current_state = None
+                        for component in data.get('components', []):
+                            if component.get('id') == 1:
+                                current_state = component.get('state', False)
+                                break
 
-                            if current_state != self._last_state:
-                                _LOGGER.debug(
-                                    "State changed from %s to %s",
-                                    self._last_state,
-                                    current_state
-                                )
-                                self._last_state = current_state
+                        if current_state != self._last_state:
+                            _LOGGER.debug(
+                                "State changed from %s to %s",
+                                self._last_state,
+                                current_state
+                            )
+                            self._last_state = current_state
 
-                            return {"state": current_state}
-                        raise UpdateFailed(f"Error fetching data: {response.status}")
+                        return {"state": current_state}
+                    _LOGGER.error("Error fetching data: %s", response.status)
+                    return self.data
+
         except Exception as err:
             _LOGGER.error("Error communicating with device: %s", err)
-            raise UpdateFailed(f"Error communicating with device: {err}")
+            # Return previous state on error
+            return self.data if self.data else {"state": False}
 
 class ShellySwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Shelly switch."""
@@ -117,7 +101,8 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         super().__init__(coordinator)
         self._name = name
         self._attr_unique_id = f"shelly_custom_{coordinator.host}"
-        self._attr_is_on = coordinator.data.get("state", False)
+        self._attr_is_on = False
+        self._pending_state = None
 
     @property
     def name(self):
@@ -127,14 +112,9 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if switch is on."""
-        return self.coordinator.data.get("state", False)
-
-    @property
-    def state(self):
-        """Return the state of the switch."""
-        if self.coordinator.data.get("state"):
-            return STATE_ON
-        return STATE_OFF
+        if self._pending_state is not None:
+            return self._pending_state
+        return self.coordinator.data.get("state", False) if self.coordinator.data else False
 
     @property
     def available(self):
@@ -143,13 +123,23 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs):
         """Turn the switch on."""
-        await self._set_state(True)
+        self._pending_state = True
+        self.async_write_ha_state()
+        success = await self._set_state(True)
+        if not success:
+            self._pending_state = None
+            self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs):
         """Turn the switch off."""
-        await self._set_state(False)
+        self._pending_state = False
+        self.async_write_ha_state()
+        success = await self._set_state(False)
+        if not success:
+            self._pending_state = None
+            self.async_write_ha_state()
 
-    async def _set_state(self, state: bool):
+    async def _set_state(self, state: bool) -> bool:
         """Set the state of the switch."""
         url = f"http://{self.coordinator.host}/rpc/Shelly.SetState"
         state_json = json.dumps({"state": state})
@@ -163,21 +153,33 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, params=params) as response:
                         if response.status == 200:
-                            self.coordinator.data = {"state": state}
-                            self.async_write_ha_state()
-                            await self.coordinator.async_request_refresh()
-                        else:
-                            _LOGGER.error(
-                                "Error setting state: %s", 
-                                await response.text()
-                            )
+                            response_data = await response.json()
+                            if response_data.get("was_on") == state:
+                                _LOGGER.debug("State set successfully to %s", state)
+                                # Wait briefly for the device to change state
+                                await asyncio.sleep(0.5)
+                                # Request a refresh to confirm the state
+                                await self.coordinator.async_request_refresh()
+                                self._pending_state = None
+                                return True
+                        _LOGGER.error(
+                            "Error setting state: %s", 
+                            await response.text()
+                        )
+                        return False
         except Exception as err:
             _LOGGER.error("Error setting state: %s", err)
+            return False
 
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
         await super().async_added_to_hass()
         _LOGGER.debug("Entity added to Home Assistant")
-        
-        # Force initial state update
-        self._handle_coordinator_update()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        if self._pending_state is not None and self.coordinator.data:
+            if self.coordinator.data.get("state") == self._pending_state:
+                self._pending_state = None
+        super()._handle_coordinator_update()
