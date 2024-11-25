@@ -59,7 +59,7 @@ class ShellyUpdateCoordinator(DataUpdateCoordinator):
             update_interval=update_interval,
         )
         self.host = host
-        self._last_state = None
+        self.data = {"state": False}  # Initialize with a default state
         self._session = aiohttp.ClientSession()
 
     async def _async_update_data(self):
@@ -70,28 +70,17 @@ class ShellyUpdateCoordinator(DataUpdateCoordinator):
                 async with self._session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
-                        current_state = None
                         for component in data.get('components', []):
                             if component.get('id') == 1:
-                                current_state = component.get('state', False)
-                                break
-
-                        if current_state != self._last_state:
-                            _LOGGER.debug(
-                                "State changed from %s to %s",
-                                self._last_state,
-                                current_state
-                            )
-                            self._last_state = current_state
-
-                        return {"state": current_state}
-                    _LOGGER.error("Error fetching data: %s", response.status)
-                    return self.data
+                                new_state = component.get('state', False)
+                                _LOGGER.debug("Retrieved state: %s", new_state)
+                                return {"state": new_state}
+                        return self.data  # Return previous state if no state found
+                    return self.data  # Return previous state on non-200 response
 
         except Exception as err:
             _LOGGER.error("Error communicating with device: %s", err)
-            # Return previous state on error
-            return self.data if self.data else {"state": False}
+            return self.data  # Return previous state on error
 
 class ShellySwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Shelly switch."""
@@ -101,8 +90,13 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         super().__init__(coordinator)
         self._name = name
         self._attr_unique_id = f"shelly_custom_{coordinator.host}"
-        self._attr_is_on = False
-        self._pending_state = None
+        self._state = False
+        self._session = aiohttp.ClientSession()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Close sessions when removed."""
+        await super().async_will_remove_from_hass()
+        await self._session.close()
 
     @property
     def name(self):
@@ -110,33 +104,27 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         return self._name
 
     @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return true if switch is on."""
-        if self._pending_state is not None:
-            return self._pending_state
-        return self.coordinator.data.get("state", False) if self.coordinator.data else False
+        if self.coordinator.data:
+            self._state = self.coordinator.data.get("state", self._state)
+        return self._state
 
     @property
-    def available(self):
+    def available(self) -> bool:
         """Return if entity is available."""
         return self.coordinator.last_update_success
 
-    async def async_turn_on(self, **kwargs):
+    async def async_turn_on(self, **kwargs) -> None:
         """Turn the switch on."""
-        self._pending_state = True
-        self.async_write_ha_state()
-        success = await self._set_state(True)
-        if not success:
-            self._pending_state = None
+        if await self._set_state(True):
+            self._state = True
             self.async_write_ha_state()
 
-    async def async_turn_off(self, **kwargs):
+    async def async_turn_off(self, **kwargs) -> None:
         """Turn the switch off."""
-        self._pending_state = False
-        self.async_write_ha_state()
-        success = await self._set_state(False)
-        if not success:
-            self._pending_state = None
+        if await self._set_state(False):
+            self._state = False
             self.async_write_ha_state()
 
     async def _set_state(self, state: bool) -> bool:
@@ -150,36 +138,27 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         }
         try:
             async with async_timeout.timeout(5):
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, params=params) as response:
-                        if response.status == 200:
-                            response_data = await response.json()
-                            if response_data.get("was_on") == state:
-                                _LOGGER.debug("State set successfully to %s", state)
-                                # Wait briefly for the device to change state
-                                await asyncio.sleep(0.5)
-                                # Request a refresh to confirm the state
-                                await self.coordinator.async_request_refresh()
-                                self._pending_state = None
-                                return True
-                        _LOGGER.error(
-                            "Error setting state: %s", 
-                            await response.text()
-                        )
-                        return False
+                async with self._session.get(url, params=params) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+                        success = response_data.get("was_on") == (not state)  # Check if state changed
+                        if success:
+                            _LOGGER.debug("State set successfully to %s", state)
+                            self.coordinator.data = {"state": state}  # Update coordinator data
+                            await self.coordinator.async_request_refresh()
+                            return True
+                    _LOGGER.error(
+                        "Error setting state: %s", 
+                        await response.text() if response.status == 200 else response.status
+                    )
+                    return False
         except Exception as err:
             _LOGGER.error("Error setting state: %s", err)
             return False
 
-    async def async_added_to_hass(self) -> None:
-        """Run when entity about to be added to hass."""
-        await super().async_added_to_hass()
-        _LOGGER.debug("Entity added to Home Assistant")
-
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        if self._pending_state is not None and self.coordinator.data:
-            if self.coordinator.data.get("state") == self._pending_state:
-                self._pending_state = None
-        super()._handle_coordinator_update()
+        if self.coordinator.data:
+            self._state = self.coordinator.data.get("state", self._state)
+        self.async_write_ha_state()
