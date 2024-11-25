@@ -1,0 +1,17 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Add Shelly Device",
+                "data": {
+                    "host": "IP Address",
+                    "name": "Name"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Failed to connect to device",
+            "unknown": "Unexpected error occurred"
+        }
+    }
+}

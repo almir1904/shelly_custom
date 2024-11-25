@@ -1,0 +1,9 @@
+{
+    "name": "Shelly Custom Integration",
+    "render_readme": true,
+    "domains": ["switch"],
+    "homeassistant": "2023.8.0",
+    "iot_class": "local_polling",
+    "zip_release": true,
+    "filename": "shelly_custom.zip"
+}
