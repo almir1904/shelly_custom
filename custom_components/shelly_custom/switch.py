@@ -3,6 +3,7 @@ import logging
 import aiohttp
 import async_timeout
 import asyncio
+import json
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -73,10 +74,12 @@ class ShellySwitch(SwitchEntity):
     async def _set_state(self, state: bool):
         """Set the state of the switch."""
         url = f"http://{self._host}/rpc/Shelly.SetState"
+        # Convert the state parameters to a URL-encoded string
+        state_json = json.dumps({"state": state})
         params = {
-            "id": 1,
-            "type": 0,
-            "state": {"state": state}
+            "id": "1",
+            "type": "0",
+            "state": state_json
         }
         try:
             async with aiohttp.ClientSession() as session:
@@ -86,6 +89,9 @@ class ShellySwitch(SwitchEntity):
                             self._state = state
                             self._available = True
                             return True
+                        else:
+                            _LOGGER.error("Error setting state: %s", await response.text())
+                            return False
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             _LOGGER.error("Error setting state: %s", err)
             self._available = False
