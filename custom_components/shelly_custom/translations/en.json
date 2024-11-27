@@ -4,15 +4,16 @@
             "user": {
                 "title": "Add Shelly Device",
                 "data": {
-                    "host": "IP Address",
-                    "name": "Name",
-                    "scan_interval": "Update interval (seconds)"
+                    "host": "IP Address or Hostname"
                 }
             }
         },
         "error": {
-            "cannot_connect": "Failed to connect to device",
-            "unknown": "Unexpected error occurred"
+            "cannot_connect": "Failed to connect",
+            "unknown": "Unexpected error"
+        },
+        "abort": {
+            "already_configured": "Device is already configured"
         }
     }
 }
