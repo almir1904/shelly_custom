@@ -16,20 +16,9 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 
-from .const import (
-    DOMAIN,
-    ATTR_DEVICE_ID,
-    ATTR_MAC,
-    ATTR_MODEL,
-    ATTR_FIRMWARE_VERSION,
-    ATTR_TEMPERATURE,
-    ATTR_WIFI_RSSI,
-    ATTR_IP_ADDRESS,
-)
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-
-SCAN_INTERVAL = timedelta(seconds=30)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -37,25 +26,38 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Shelly switch."""
-    coordinator = ShellyCoordinator(
-        hass,
-        entry.data[CONF_HOST],
-    )
-    await coordinator.async_config_entry_first_refresh()
-
-    switches = []
-    for component in coordinator.data["components"]:
-        if component["type"] == 0:  # Switch type
-            switches.append(
-                ShellySwitch(
-                    coordinator,
-                    component["name"],
-                    entry.entry_id,
-                    component["id"]
-                )
-            )
+    host = entry.data[CONF_HOST]
+    _LOGGER.debug("Setting up Shelly switch with host: %s", host)
     
-    async_add_entities(switches)
+    try:
+        # Get initial device info
+        session = async_get_clientsession(hass)
+        async with session.get(f"http://{host}/rpc/Shelly.GetInfoExt") as response:
+            response.raise_for_status()
+            data = await response.json()
+            _LOGGER.debug("Device info: %s", data)
+            
+            coordinator = ShellyCoordinator(hass, host)
+            await coordinator.async_config_entry_first_refresh()
+
+            devices = []
+            for component in data.get("components", []):
+                if component.get("type") == 0:  # Switch type
+                    _LOGGER.debug("Adding switch component: %s", component)
+                    devices.append(
+                        ShellySwitch(
+                            coordinator,
+                            component.get("name", "Unknown"),
+                            entry.entry_id,
+                            component["id"],
+                            data.get("name", "Unknown Device")
+                        )
+                    )
+
+            async_add_entities(devices)
+            _LOGGER.debug("Added %d switches", len(devices))
+    except Exception as ex:
+        _LOGGER.error("Error setting up Shelly switch: %s", ex)
 
 class ShellyCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data updates."""
@@ -66,44 +68,27 @@ class ShellyCoordinator(DataUpdateCoordinator):
             hass,
             _LOGGER,
             name="Shelly Switch",
-            update_interval=SCAN_INTERVAL,
+            update_interval=timedelta(seconds=30),
         )
         self.host = host
         self.session = async_get_clientsession(hass)
-        self.device_info = None
 
     async def _async_update_data(self):
         """Fetch data from Shelly device."""
-        async with async_timeout.timeout(10):
-            url = f"http://{self.host}/rpc/Shelly.GetInfoExt"
-            async with self.session.get(url) as response:
-                response.raise_for_status()
-                data = await response.json()
-                
-                # Store device info
-                self.device_info = {
-                    "device_id": data.get("device_id"),
-                    "name": data.get("name"),
-                    "model": data.get("model"),
-                    "sw_version": data.get("version"),
-                    "fw_build": data.get("fw_build"),
-                    "mac": data.get("mac_address"),
-                    "host": data.get("host"),
-                    "temperature": data.get("sys_temp"),
-                    "wifi_rssi": data.get("wifi_conn_rssi"),
-                    "ip_address": data.get("wifi_conn_ip"),
-                }
-
-                return {
-                    "components": data.get("components", []),
-                    "available": True,
-                    "device_info": self.device_info
-                }
+        try:
+            async with async_timeout.timeout(10):
+                async with self.session.get(f"http://{self.host}/rpc/Shelly.GetInfoExt") as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    _LOGGER.debug("Updated data from device: %s", data)
+                    return data
+        except Exception as err:
+            _LOGGER.error("Error getting data from device: %s", err)
+            raise
 
 class ShellySwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Shelly switch."""
 
-    _attr_device_class = SwitchDeviceClass.OUTLET
     _attr_has_entity_name = True
 
     def __init__(
@@ -112,39 +97,18 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         name: str,
         entry_id: str,
         component_id: int,
+        device_name: str,
     ) -> None:
         """Initialize the switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"shelly_custom_{coordinator.device_info['mac']}_{component_id}"
+        self._attr_unique_id = f"{entry_id}_{component_id}"
         self._attr_name = name
         self._component_id = component_id
-
-    @property
-    def device_info(self):
-        """Return device info."""
-        return {
-            "identifiers": {
-                (DOMAIN, self.coordinator.device_info["mac"])
-            },
-            "name": self.coordinator.device_info["name"],
-            "model": self.coordinator.device_info["model"],
+        self._device_name = device_name
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"{entry_id}")},
+            "name": device_name,
             "manufacturer": "Shelly",
-            "sw_version": self.coordinator.device_info["sw_version"],
-            "firmware_version": self.coordinator.device_info["fw_build"],
-            "suggested_area": self.coordinator.device_info["name"].split("-")[-1] if "-" in self.coordinator.device_info["name"] else None,
-        }
-
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        return {
-            ATTR_DEVICE_ID: self.coordinator.device_info["device_id"],
-            ATTR_MAC: self.coordinator.device_info["mac"],
-            ATTR_MODEL: self.coordinator.device_info["model"],
-            ATTR_FIRMWARE_VERSION: self.coordinator.device_info["fw_build"],
-            ATTR_TEMPERATURE: self.coordinator.device_info["temperature"],
-            ATTR_WIFI_RSSI: self.coordinator.device_info["wifi_rssi"],
-            ATTR_IP_ADDRESS: self.coordinator.device_info["ip_address"],
         }
 
     @property
@@ -152,34 +116,31 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
         """Return true if switch is on."""
         if not self.coordinator.data:
             return False
-        for component in self.coordinator.data["components"]:
-            if component["id"] == self._component_id:
+        for component in self.coordinator.data.get("components", []):
+            if component.get("id") == self._component_id:
                 return component.get("state", False)
         return False
-
-    @property
-    def available(self) -> bool:
-        """Return if entity is available."""
-        return self.coordinator.data.get("available", False) if self.coordinator.data else False
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the entity on."""
         await self._set_state(True)
-        await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn the entity off."""
         await self._set_state(False)
-        await self.coordinator.async_request_refresh()
 
     async def _set_state(self, state: bool) -> None:
         """Set the state."""
-        url = f"http://{self.coordinator.host}/rpc/Shelly.SetState"
-        params = {
-            "id": str(self._component_id),
-            "type": "0",
-            "state": json.dumps({"state": state})
-        }
-        async with async_timeout.timeout(10):
-            async with self.coordinator.session.get(url, params=params) as response:
+        try:
+            url = f"http://{self.coordinator.host}/rpc/Shelly.SetState"
+            params = {
+                "id": str(self._component_id),
+                "type": "0",
+                "state": json.dumps({"state": state})
+            }
+            session = async_get_clientsession(self.coordinator.hass)
+            async with session.get(url, params=params) as response:
                 response.raise_for_status()
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("Error setting state: %s", err)
