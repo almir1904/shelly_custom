@@ -10,10 +10,21 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.const import CONF_HOST, CONF_NAME
+from homeassistant.const import CONF_HOST
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
+)
+
+from .const import (
+    DOMAIN,
+    ATTR_DEVICE_ID,
+    ATTR_MAC,
+    ATTR_MODEL,
+    ATTR_FIRMWARE_VERSION,
+    ATTR_TEMPERATURE,
+    ATTR_WIFI_RSSI,
+    ATTR_IP_ADDRESS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,12 +82,16 @@ class ShellyCoordinator(DataUpdateCoordinator):
                 
                 # Store device info
                 self.device_info = {
+                    "device_id": data.get("device_id"),
                     "name": data.get("name"),
                     "model": data.get("model"),
                     "sw_version": data.get("version"),
                     "fw_build": data.get("fw_build"),
                     "mac": data.get("mac_address"),
                     "host": data.get("host"),
+                    "temperature": data.get("sys_temp"),
+                    "wifi_rssi": data.get("wifi_conn_rssi"),
+                    "ip_address": data.get("wifi_conn_ip"),
                 }
 
                 return {
@@ -100,7 +115,7 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
     ) -> None:
         """Initialize the switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"shelly_custom_{entry_id}_{component_id}"
+        self._attr_unique_id = f"shelly_custom_{coordinator.device_info['mac']}_{component_id}"
         self._attr_name = name
         self._component_id = component_id
 
@@ -108,13 +123,28 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
     def device_info(self):
         """Return device info."""
         return {
-            "identifiers": {("shelly", self.coordinator.device_info["mac"])},
+            "identifiers": {
+                (DOMAIN, self.coordinator.device_info["mac"])
+            },
             "name": self.coordinator.device_info["name"],
             "model": self.coordinator.device_info["model"],
             "manufacturer": "Shelly",
             "sw_version": self.coordinator.device_info["sw_version"],
             "firmware_version": self.coordinator.device_info["fw_build"],
             "suggested_area": self.coordinator.device_info["name"].split("-")[-1] if "-" in self.coordinator.device_info["name"] else None,
+        }
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        return {
+            ATTR_DEVICE_ID: self.coordinator.device_info["device_id"],
+            ATTR_MAC: self.coordinator.device_info["mac"],
+            ATTR_MODEL: self.coordinator.device_info["model"],
+            ATTR_FIRMWARE_VERSION: self.coordinator.device_info["fw_build"],
+            ATTR_TEMPERATURE: self.coordinator.device_info["temperature"],
+            ATTR_WIFI_RSSI: self.coordinator.device_info["wifi_rssi"],
+            ATTR_IP_ADDRESS: self.coordinator.device_info["ip_address"],
         }
 
     @property
@@ -131,15 +161,6 @@ class ShellySwitch(CoordinatorEntity, SwitchEntity):
     def available(self) -> bool:
         """Return if entity is available."""
         return self.coordinator.data.get("available", False) if self.coordinator.data else False
-
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        return {
-            "firmware_version": self.coordinator.device_info["fw_build"],
-            "model": self.coordinator.device_info["model"],
-            "host": self.coordinator.device_info["host"],
-        }
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the entity on."""
